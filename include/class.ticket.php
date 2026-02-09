@@ -3703,6 +3703,10 @@ implements RestrictedAccess, Threadable, Searchable {
                 $errors['duedate']=__('Invalid due date');
             elseif (Misc::user2gmtime($vars['duedate']) <= Misc::user2gmtime())
                 $errors['duedate']=__('Due date must be in the future');
+            // Limit: only 1 ticket may be due per calendar day
+            elseif (self::countTicketsDueOnDate($vars['duedate'],
+                        $this->getId()) >= 1)
+                $errors['duedate']=__('A ticket is already due on this date. Only 1 ticket may be due per day.');
         }
 
         if (isset($vars['source']) // Check ticket source if provided
@@ -3963,6 +3967,39 @@ implements RestrictedAccess, Threadable, Searchable {
         return db_fetch_array(db_query($sql));
     }
 
+    /*
+     * Count open tickets that have a due date (manual or SLA-estimated)
+     * falling on the given calendar date.
+     *
+     * @param string $date - date string (any format parseable by strtotime)
+     * @param int $excludeTicketId - ticket ID to exclude from the count (optional)
+     * @return int - number of tickets due on that date
+     */
+    static function countTicketsDueOnDate($date, $excludeTicketId=0) {
+        $day = date('Y-m-d', strtotime($date));
+        $nextDay = date('Y-m-d', strtotime($day . ' +1 day'));
+
+        $sql = 'SELECT COUNT(*) FROM ' . TICKET_TABLE . ' ticket'
+             . ' INNER JOIN ' . TICKET_STATUS_TABLE . ' status'
+             . '   ON (status.id = ticket.status_id AND status.state = \'open\')'
+             . ' WHERE ('
+             . '   (ticket.duedate IS NOT NULL'
+             . '     AND ticket.duedate >= ' . db_input($day)
+             . '     AND ticket.duedate < '  . db_input($nextDay) . ')'
+             . '   OR'
+             . '   (ticket.duedate IS NULL'
+             . '     AND ticket.est_duedate IS NOT NULL'
+             . '     AND ticket.est_duedate >= ' . db_input($day)
+             . '     AND ticket.est_duedate < '  . db_input($nextDay) . ')'
+             . ' )';
+
+        if ($excludeTicketId)
+            $sql .= ' AND ticket.ticket_id != ' . db_input($excludeTicketId);
+
+        $row = db_fetch_row(db_query($sql));
+        return $row ? (int) $row[0] : 0;
+    }
+
     protected static function filterTicketData($origin, $vars, $forms, $user=false, $postCreate=false) {
         global $cfg;
 
@@ -4136,6 +4173,10 @@ implements RestrictedAccess, Threadable, Searchable {
                 $errors['duedate']=__('Invalid due date');
             elseif (Misc::user2gmtime($vars['duedate']) <= Misc::user2gmtime())
                 $errors['duedate']=__('Due date must be in the future');
+            // Limit: only 1 ticket may be due per calendar day (staff only)
+            elseif (!strcasecmp($origin, 'staff')
+                    && self::countTicketsDueOnDate($vars['duedate']) >= 1)
+                $errors['duedate']=__('A ticket is already due on this date. Only 1 ticket may be due per day.');
         }
 
         $topic_forms = array();
@@ -4536,6 +4577,19 @@ implements RestrictedAccess, Threadable, Searchable {
 
         // Update the estimated due date in the database
         $ticket->updateEstDueDate();
+
+        // Enforce: only 1 ticket may be due per calendar day (staff only).
+        // When no manual duedate was set, the effective due date comes from
+        // the SLA (est_duedate) which is computed above.  Check it now.
+        if (!strcasecmp($origin, 'staff')
+                && !$vars['duedate']
+                && ($estDue = $ticket->getEstDueDate())
+                && self::countTicketsDueOnDate($estDue,
+                        $ticket->getId()) >= 1) {
+            $ticket->delete();
+            $errors['err'] = __('A ticket is already due on the SLA due date. Only 1 ticket may be due per day.');
+            return 0;
+        }
 
         /**********   double check auto-response  ************/
         //Override auto responder if the FROM email is one of the internal emails...loop control.
