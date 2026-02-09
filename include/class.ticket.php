@@ -3976,7 +3976,11 @@ implements RestrictedAccess, Threadable, Searchable {
      * @return int - number of tickets due on that date
      */
     static function countTicketsDueOnDate($date, $excludeTicketId=0) {
-        $day = date('Y-m-d', strtotime($date));
+        $ts = strtotime($date);
+        if ($ts === false)
+            return 0;
+
+        $day = date('Y-m-d', $ts);
         $nextDay = date('Y-m-d', strtotime($day . ' +1 day'));
 
         $sql = 'SELECT COUNT(*) FROM ' . TICKET_TABLE . ' ticket'
